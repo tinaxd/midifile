@@ -34,14 +34,17 @@ toFormat 1 = Just Format1
 toFormat 2 = Just Format2
 toFormat _ = Nothing
 
-readNextBytes :: Int -> SMFReader [Word8]
-readNextBytes n = do
+readNextBytes' :: Int -> Bool -> SMFReader [Word8]
+readNextBytes' n move = do
     raw <- ask
     ptr <- gets pointer
     let sub = subInt ptr n raw
-    modify $ moveReaderState n
+    when move $ modify $ moveReaderState n
     guard $ length sub == n
     return sub
+
+readNextBytes n = readNextBytes' n True
+peekNextBytes n = readNextBytes' n False
 
 toInt [] = 0
 toInt ls = (fromIntegral l) + 256 * (toInt f)
@@ -49,8 +52,15 @@ toInt ls = (fromIntegral l) + 256 * (toInt f)
         l = last ls
         f = init ls
 
+toString :: [Word8] -> String
+toString = undefined
+
 readNextByte = head <$> readNextBytes 1
 readNextWord = toInt <$> readNextBytes 2
+
+
+peekNextByte = head <$> peekNextBytes 1
+peekNextWord = toInt <$> peekNextBytes 2
 
 readVLQ :: SMFReader Int
 readVLQ = do
@@ -65,8 +75,8 @@ readMThdWithMarker = do
     size <- toInt <$> readNextBytes 4
     guard $ size == 6
     format <-join $ (liftMaybe . toFormat) <$> readNextWord
-    tracks <- readNextWord
-    ppq <- readNextWord
+    tracks <- fromIntegral <$> readNextWord
+    ppq <- fromIntegral <$> readNextWord
     return $ MThd $ HeaderInfo format tracks ppq
 
 data MidiEventType = NoteOnTy | NoteOffTy | PolyphonicTy | CCTy | ChPressureTy | PitchBendTy | PCTy
@@ -106,9 +116,8 @@ getMidiEventType = do
         check i = maybe checkRunningStatus (\(a, b, c) -> make a b c) (check' i)
                                 
 
-readMidiEvent :: SMFReader MidiEvent
-readMidiEvent = do
-    (ty, ch) <- getMidiEventType
+readMidiEvent :: (MidiEventType, Word8) -> SMFReader MidiEvent
+readMidiEvent (ty, ch) = do
     let read1 m = liftM (m ch) readNextByte
         read2 m = liftM2 (m ch) readNextByte readNextByte
         readPB = liftM (PitchBendChange ch) (fromIntegral <$> readNextWord)
@@ -121,18 +130,56 @@ readMidiEvent = do
         ChPressureTy -> read1 ChannelPressure
         PitchBendTy -> readPB
 
-readSysEx :: SMFReader SysExEvent
-readSysEx = do
-    sysExType <- readNextByte
-    case sysExType of
-        0xf0 -> do length <- readVLQ
+data SysExType = F0Ty | F7Ty deriving (Show, Eq, Enum)
+
+getSysExType = do
+    ty <- readNextByte
+    case ty of
+        0xf0 -> return F0Ty
+        0xf7 -> return F7Ty
+        _ -> empty
+
+readSysEx :: SysExType -> SMFReader SysExEvent
+readSysEx ty = do
+    case ty of
+        F0Ty -> do length <- readVLQ
                    sysExData <- readNextBytes length
                    guard $ last sysExData == 0xf7
                    return $ ExclusiveF0 sysExData
-        0xf7 -> do length <- readVLQ
+        F7Ty -> do length <- readVLQ
                    sysExData <- readNextBytes length
                    return $ ExclusiveF7 sysExData
-        _ -> empty
 
 readMetaEvent :: SMFReader MetaEvent
-readMetaEvent = undefined
+readMetaEvent = do
+    ff <- readNextByte
+    guard $ ff == 0xff
+    ty <- readNextByte
+    case ty of
+        0x00 -> do checkLength 2
+                   liftM SequenceNumber readNextWord
+        x | 0x01 <= x && x <= 0xf9 -> readText x
+        0x2f -> return EndOfTrack
+        0x51 -> setTempo
+        0x54 -> smpte
+        0x58 -> timeSignature
+        0x59 -> keySignature
+        0x7f -> sequencerSpecific
+    where
+        checkLength n = (n ==) <$> readVLQ
+        toMeta x = undefined
+        readText x = ((toMeta x) . toString) <$> (readVLQ >>= readNextBytes)
+        setTempo = do checkLength 3
+                      (SetTempo . toInt) <$> readNextBytes 3
+        smpte = do checkLength 5
+                   liftM5 SMPTEOffset readNextByte readNextByte readNextByte readNextByte readNextByte
+        timeSignature = do checkLength 4
+                           liftM4 TimeSignature readNextByte readNextByte readNextByte readNextByte
+        keySignature = do checkLength 2
+                          liftM2 KeySignature readNextByte readNextByte
+        sequencerSpecific = SequencerSpecific <$> (readVLQ >>= readNextBytes)
+
+readEvent :: SMFReader Event
+readEvent = (getMidiEventType >>= readMidiEvent >>= (return . MidiE))
+            <|> (readMetaEvent >>= (return . MetaE))
+            <|> (getSysExType >>= readSysEx >>= (return . SysExE))

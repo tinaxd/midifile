@@ -61,9 +61,9 @@ data MetaEvent = SequenceNumber Word8
                | Marker String
                | CuePoint String
                | EndOfTrack
-               | SetTempo
+               | SetTempo Int
                | SMPTEOffset Word8 Word8 Word8 Word8 Word8
                | TimeSignature Word8 Word8 Word8 Word8
-               | KeySignature Word8
+               | KeySignature Word8 Word8
                | SequencerSpecific [Word8]
                deriving (Show, Eq)
