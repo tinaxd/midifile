@@ -18,10 +18,13 @@ liftMaybe m = case m of
                 Nothing -> empty
 
 data ReaderState = ReaderState {
-    pointer :: Int
+    pointer :: Int,
+    runningStatus :: Maybe Word8
 } deriving (Show, Eq)
 
 moveReaderState n s = s {pointer = (pointer s) + n}
+updateRunningStatus r s = s {runningStatus = Just r}
+clearRunningStatus s = s {runningStatus = Nothing}
 
 subString a n s = BS.take n $ BS.drop a s 
 subInt a n s = BS.unpack $ subString a n s
@@ -69,28 +72,43 @@ readMThdWithMarker = do
 data MidiEventType = NoteOnTy | NoteOffTy | PolyphonicTy | CCTy | ChPressureTy | PitchBendTy | PCTy
                      deriving (Show, Eq, Enum)
 
-getMidiEventType i = if i >= 0x80
-                      then make NoteOffTy 0x80
-                      else if i >= 0x90
-                       then make NoteOnTy 0x90
-                       else if i>= 0xa0
-                        then make PolyphonicTy 0xa0
-                        else if i >= 0xb0
-                         then make CCTy 0xb0
-                         else if i >= 0xc0
-                          then make PCTy 0xc0
-                          else if i >= 0xd0
-                           then make ChPressureTy 0xd0
-                           else if i >= 0xe0
-                            then make PitchBendTy 0xe0
-                            else Nothing
+getMidiEventType = do
+    i <- readNextByte
+    check i
     where
-        channel b = i - b
-        make ty b = Just (ty, (channel b))
+        channel b i = i - b
+        make :: MidiEventType -> Word8 -> Word8 -> SMFReader (MidiEventType, Word8)
+        make ty ch i = do modify $ updateRunningStatus i
+                          return $ (ty, ch)
+        make' ty b i = Just (ty, (channel b i), i)
+        checkRunningStatus = do rs <- gets runningStatus
+                                case rs of
+                                    Nothing -> empty
+                                    Just rs' -> case (check' rs') of
+                                                    Just (ty, ch, i) -> make ty ch i
+                                                    Nothing -> empty
+        check' i = 
+            if i >= 0x80
+             then make' NoteOffTy 0x80 i
+             else if i >= 0x90
+              then make' NoteOnTy 0x90 i
+              else if i>= 0xa0
+               then make' PolyphonicTy 0xa0 i
+               else if i >= 0xb0
+                then make' CCTy 0xb0 i
+                else if i >= 0xc0
+                 then make' PCTy 0xc0 i
+                 else if i >= 0xd0
+                  then make' ChPressureTy 0xd0 i
+                  else if i >= 0xe0
+                   then make' PitchBendTy 0xe0 i
+                   else Nothing
+        check i = maybe checkRunningStatus (\(a, b, c) -> make a b c) (check' i)
+                                
 
 readMidiEvent :: SMFReader MidiEvent
 readMidiEvent = do
-    (ty, ch) <- (liftMaybe . getMidiEventType) =<< readNextByte
+    (ty, ch) <- getMidiEventType
     let read1 m = liftM (m ch) readNextByte
         read2 m = liftM2 (m ch) readNextByte readNextByte
         readPB = liftM (PitchBendChange ch) (fromIntegral <$> readNextWord)
@@ -115,3 +133,6 @@ readSysEx = do
                    sysExData <- readNextBytes length
                    return $ ExclusiveF7 sysExData
         _ -> empty
+
+readMetaEvent :: SMFReader MetaEvent
+readMetaEvent = undefined
