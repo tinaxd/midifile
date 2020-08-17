@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: e47d185b7115b5114148e1989627f1a77bd9e3c7de5f305a3ccf343559f83aea
+-- hash: 6ece111c2f3c901f937735308b8b6a5a303de793f0c9f619233490e26f6be9d7
 
 name:           midifile
 version:        0.1.0.0
@@ -29,6 +29,7 @@ library
   exposed-modules:
       MidiFile.Data
       MidiFile.Reader
+      MidiFile.Writer
   other-modules:
       Paths_midifile
   hs-source-dirs:

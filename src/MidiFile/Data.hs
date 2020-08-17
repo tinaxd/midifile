@@ -1,4 +1,9 @@
 module MidiFile.Data (
+    SMF,
+    makeSMF,
+    getAllChunks,
+    getMThd,
+    getMTrd,
     Chunk(..),
     HeaderInfo(..),
     SMFFormat(..),
@@ -13,9 +18,15 @@ module MidiFile.Data (
 import Data.Word
 import Data.Int
 
+data SMF = SMF [Chunk] deriving (Show, Eq)
+
+makeSMF chunks = SMF chunks
+getAllChunks (SMF chunks) = chunks
+getMThd (SMF chunks) = undefined
+getMTrd (SMF chunks) = undefined
 
 data Chunk = MThd HeaderInfo
-           | MTrk [Track]
+           | MTrk Track
            deriving (Show, Eq)
 
 data HeaderInfo = HeaderInfo {

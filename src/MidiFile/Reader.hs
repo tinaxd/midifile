@@ -1,7 +1,9 @@
-module MidiFile.Reader where
+module MidiFile.Reader (
+    parseSMFBytes,
+    parseSMFFile
+) where
 
 import Control.Monad.State
-import Control.Monad.Reader
 import Control.Monad.Trans.Maybe
 import qualified Data.ByteString as BS
 import MidiFile.Data
@@ -9,7 +11,7 @@ import Data.Word
 import Control.Applicative
 
 
-type SMFReader' = StateT ReaderState (Reader BS.ByteString)
+type SMFReader' = State ReaderState
 
 type SMFReader a = MaybeT SMFReader' a
 
@@ -18,9 +20,18 @@ liftMaybe m = case m of
                 Nothing -> empty
 
 data ReaderState = ReaderState {
+    raw :: BS.ByteString,
     pointer :: Int,
     runningStatus :: Maybe Word8
 } deriving (Show, Eq)
+
+initReaderState bs = ReaderState bs 0 Nothing
+
+isEOF :: SMFReader Bool
+isEOF = do
+    bs <- gets raw
+    ptr <- gets pointer
+    return $ ptr == BS.length bs
 
 moveReaderState n s = s {pointer = (pointer s) + n}
 updateRunningStatus r s = s {runningStatus = Just r}
@@ -36,7 +47,7 @@ toFormat _ = Nothing
 
 readNextBytes' :: Int -> Bool -> SMFReader [Word8]
 readNextBytes' n move = do
-    raw <- ask
+    raw <- gets raw
     ptr <- gets pointer
     let sub = subInt ptr n raw
     when move $ modify $ moveReaderState n
@@ -45,6 +56,14 @@ readNextBytes' n move = do
 
 readNextBytes n = readNextBytes' n True
 peekNextBytes n = readNextBytes' n False
+
+limited size m = do
+    s <- get
+    r <- mapMaybeT (\mm -> withStateT limitData mm) m
+    put s
+    return r
+    where
+        limitData rs = rs {pointer = 0, raw = subString (pointer rs) size (raw rs)}
 
 toInt [] = 0
 toInt ls = (fromIntegral l) + 256 * (toInt f)
@@ -70,8 +89,9 @@ readVLQ = do
         else do rest <- readVLQ
                 return $ (fromIntegral first) * 256 + rest
 
-readMThdWithMarker :: SMFReader Chunk
 readMThdWithMarker = do
+    magic <- readNextBytes 4
+    guard $ magic == [0x4d, 0x54, 0x68, 0x64]
     size <- toInt <$> readNextBytes 4
     guard $ size == 6
     format <-join $ (liftMaybe . toFormat) <$> readNextWord
@@ -79,42 +99,69 @@ readMThdWithMarker = do
     ppq <- fromIntegral <$> readNextWord
     return $ MThd $ HeaderInfo format tracks ppq
 
+readTrackWithMarker = do
+    magic <- readNextBytes 4
+    guard $ magic == [0x4d, 0x54, 0x72, 0x6b]
+    size <- toInt <$> readNextBytes 4
+    dat <- limited size readTimeEvents
+    modify $ moveReaderState size
+    return $ Track dat
+
+readMTrksWithMarker = do
+    whileM (not <$> isEOF) readTrackWithMarker
+
+readSMF = do
+    mthd <- readMThdWithMarker
+    mtrks <- readMTrksWithMarker
+    return $ makeSMF $ mthd : (map MTrk mtrks)
+
 data MidiEventType = NoteOnTy | NoteOffTy | PolyphonicTy | CCTy | ChPressureTy | PitchBendTy | PCTy
                      deriving (Show, Eq, Enum)
 
 getMidiEventType = do
-    i <- readNextByte
+    i <- peekNextByte
     check i
     where
         channel b i = i - b
-        make :: MidiEventType -> Word8 -> Word8 -> SMFReader (MidiEventType, Word8)
-        make ty ch i = do modify $ updateRunningStatus i
-                          return $ (ty, ch)
-        make' ty b i = Just (ty, (channel b i), i)
+        make :: MidiEventType -> Word8 -> Word8 -> Bool -> SMFReader (MidiEventType, Word8)
+        make ty ch i move = do modify $ updateRunningStatus i
+                               when move $ modify $ moveReaderState 1
+                               return $ (ty, ch)
+        make' ty b i = MidiEventExact (ty, (channel b i), i)
         checkRunningStatus = do rs <- gets runningStatus
                                 case rs of
                                     Nothing -> empty
                                     Just rs' -> case (check' rs') of
-                                                    Just (ty, ch, i) -> make ty ch i
-                                                    Nothing -> empty
-        check' i = 
-            if i >= 0x80
-             then make' NoteOffTy 0x80 i
-             else if i >= 0x90
-              then make' NoteOnTy 0x90 i
-              else if i>= 0xa0
-               then make' PolyphonicTy 0xa0 i
-               else if i >= 0xb0
-                then make' CCTy 0xb0 i
-                else if i >= 0xc0
-                 then make' PCTy 0xc0 i
-                 else if i >= 0xd0
-                  then make' ChPressureTy 0xd0 i
-                  else if i >= 0xe0
-                   then make' PitchBendTy 0xe0 i
-                   else Nothing
-        check i = maybe checkRunningStatus (\(a, b, c) -> make a b c) (check' i)
+                                                    MidiEventExact (ty, ch, i) -> make ty ch i False
+                                                    UseRunningStatus -> empty
+                                                    MidiEventFail -> empty
+        check' i =
+            if i >= 0xf0
+             then MidiEventFail
+             else if i >= 0xe0
+              then make' PitchBendTy 0xe0 i
+              else if i >= 0xd0
+               then make' ChPressureTy 0xd0 i
+               else if i >= 0xc0
+                then make' PCTy 0xc0 i
+                else if i >= 0xb0
+                 then make' CCTy 0xb0 i
+                 else if i >= 0xa0
+                  then make' PolyphonicTy 0xa0 i
+                  else if i >= 0x90
+                   then make' NoteOnTy 0x90 i
+                   else if i >= 0x80
+                    then make' NoteOffTy 0x80 i
+                    else UseRunningStatus
+        check i = case check' i of
+                    MidiEventExact (a, b, c) -> make a b c True
+                    UseRunningStatus -> checkRunningStatus
+                    MidiEventFail -> empty
                                 
+data MidiEventParseResut = MidiEventExact (MidiEventType, Word8, Word8)
+                         | UseRunningStatus
+                         | MidiEventFail
+                         deriving (Show, Eq)
 
 readMidiEvent :: (MidiEventType, Word8) -> SMFReader MidiEvent
 readMidiEvent (ty, ch) = do
@@ -141,6 +188,7 @@ getSysExType = do
 
 readSysEx :: SysExType -> SMFReader SysExEvent
 readSysEx ty = do
+    modify $ clearRunningStatus
     case ty of
         F0Ty -> do length <- readVLQ
                    sysExData <- readNextBytes length
@@ -154,17 +202,19 @@ readMetaEvent :: SMFReader MetaEvent
 readMetaEvent = do
     ff <- readNextByte
     guard $ ff == 0xff
+    modify $ clearRunningStatus
     ty <- readNextByte
     case ty of
         0x00 -> do checkLength 2
                    liftM SequenceNumber readNextWord
-        x | 0x01 <= x && x <= 0xf9 -> readText x
-        0x2f -> return EndOfTrack
+        x | 0x01 <= x && x <= 0x09 -> readText x
+        0x2f -> endOfTrack
         0x51 -> setTempo
         0x54 -> smpte
         0x58 -> timeSignature
         0x59 -> keySignature
         0x7f -> sequencerSpecific
+        _ -> empty
     where
         checkLength n = (n ==) <$> readVLQ
         toMeta x = case x of
@@ -181,6 +231,7 @@ readMetaEvent = do
                 f s = case toMeta x of
                        Just c -> return (c s)
                        Nothing -> empty
+        endOfTrack = checkLength 0 >> return EndOfTrack
         setTempo = do checkLength 3
                       (SetTempo . toInt) <$> readNextBytes 3
         smpte = do checkLength 5
@@ -191,7 +242,58 @@ readMetaEvent = do
                           liftM2 KeySignature readNextByte readNextByte
         sequencerSpecific = SequencerSpecific <$> (readVLQ >>= readNextBytes)
 
+try :: SMFReader a -> SMFReader a
+try m = do
+    a <- get
+    MaybeT $ do
+        k <- runMaybeT m
+        case k of
+            Nothing -> put a >> return Nothing
+            Just _ -> return k
+
 readEvent :: SMFReader Event
-readEvent = (getMidiEventType >>= readMidiEvent >>= (return . MidiE))
-            <|> (readMetaEvent >>= (return . MetaE))
+readEvent = try (getMidiEventType >>= readMidiEvent >>= (return . MidiE))
+            <|> try (readMetaEvent >>= (return . MetaE))
             <|> (getSysExType >>= readSysEx >>= (return . SysExE))
+
+readDelta :: SMFReader Int
+readDelta = readVLQ
+
+readTimeEvent :: SMFReader TimeEvent
+readTimeEvent = do
+    delta <- readDelta
+    event <- readEvent
+    return (delta, event)
+
+whileM cond a = do
+    cond' <- cond
+    if cond'
+        then do n <- a
+                ns <- whileM cond a
+                return $ n : ns
+        else return []
+
+readTimeEvents :: SMFReader [TimeEvent]
+readTimeEvents = whileM (not <$> isEOF) readTimeEvent
+
+parseSMFBytes bs = evalState (runMaybeT readSMF) (initReaderState bs)
+
+parseSMFFile p = do
+    bs <- BS.readFile p
+    return $ evalState (runMaybeT readSMF) (initReaderState bs)
+
+parseTest m bs = runState (runMaybeT m) (initReaderState bs)
+
+testMThd1 = BS.pack [
+        0x4d, 0x54, 0x68, 0x64, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x02, 0x00, 0x30
+    ]
+
+testMTrk1 = BS.pack [
+        0x4d, 0x54, 0x72, 0x6b, 0x00, 0x00, 0x00, 0x0b, 0x00, 0xff, 0x51, 0x03, 0x07, 0xa1, 0x20, 0x00, 0xff, 0x2f, 0x00
+    ]
+
+testMTrk2 = BS.pack [
+        0x4d, 0x54, 0x72, 0x6b, 0x00, 0x00, 0x00, 0x18, 0x00, 0x90, 0x3c, 0x7f, 0x30, 0x3c, 0x00, 0x00, 0x3e, 0x7f, 0x30, 0x3e, 0x00, 0x00, 0x40, 0x7f, 0x81, 0x49, 0x40, 0x00, 0x00, 0xff, 0x2f, 0x00
+    ]
+
+testData1 = BS.concat [testMThd1, testMTrk1, testMTrk2]
