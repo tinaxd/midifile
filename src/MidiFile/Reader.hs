@@ -167,8 +167,20 @@ readMetaEvent = do
         0x7f -> sequencerSpecific
     where
         checkLength n = (n ==) <$> readVLQ
-        toMeta x = undefined
-        readText x = ((toMeta x) . toString) <$> (readVLQ >>= readNextBytes)
+        toMeta x = case x of
+                     0x01 -> Just TextEvent
+                     0x02 -> Just CopyrightNotice
+                     0x03 -> Just SequenceTrackName
+                     0x04 -> Just InstrumentName
+                     0x05 -> Just Lyric
+                     0x06 -> Just Marker
+                     0x07 -> Just CuePoint
+                     _ -> Nothing
+        readText x = f =<< toString <$> (readVLQ >>= readNextBytes)
+            where
+                f s = case toMeta x of
+                       Just c -> return (c s)
+                       Nothing -> empty
         setTempo = do checkLength 3
                       (SetTempo . toInt) <$> readNextBytes 3
         smpte = do checkLength 5
