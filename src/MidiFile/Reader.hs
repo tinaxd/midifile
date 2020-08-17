@@ -216,7 +216,7 @@ readMetaEvent = do
         0x7f -> sequencerSpecific
         _ -> empty
     where
-        checkLength n = (n ==) <$> readVLQ
+        checkLength n = readVLQ >>= \l -> guard $ l == n
         toMeta x = case x of
                      0x01 -> Just TextEvent
                      0x02 -> Just CopyrightNotice
@@ -276,8 +276,10 @@ whileM cond a = do
 readTimeEvents :: SMFReader [TimeEvent]
 readTimeEvents = whileM (not <$> isEOF) readTimeEvent
 
+-- | Parse a ByteString as SMF data.
 parseSMFBytes bs = evalState (runMaybeT readSMF) (initReaderState bs)
 
+-- | Load and parse a SMF file.
 parseSMFFile p = do
     bs <- BS.readFile p
     return $ evalState (runMaybeT readSMF) (initReaderState bs)
