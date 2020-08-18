@@ -31,8 +31,8 @@ data Chunk = MThd HeaderInfo
 
 data HeaderInfo = HeaderInfo {
     headerSMFFormat :: SMFFormat,
-    headerTrackCount :: Int,
-    headerPPQ :: Int
+    headerTrackCount :: Word16,
+    headerPPQ :: Word16
 } deriving (Show, Eq)
 
 data SMFFormat = Format0
@@ -63,7 +63,7 @@ data SysExEvent = ExclusiveF0 [Word8]
                 | ExclusiveF7 [Word8]
                 deriving (Show, Eq)
 
-data MetaEvent = SequenceNumber Word8
+data MetaEvent = SequenceNumber Word16
                | TextEvent String
                | CopyrightNotice String
                | SequenceTrackName String
